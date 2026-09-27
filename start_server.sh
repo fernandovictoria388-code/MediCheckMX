@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+cd "$(dirname "$0")"
+if [ ! -f .env ]; then echo 'Falta backend/.env. Ejecuta ./configure_gemini.sh'; exit 1; fi
+if [ "${AUTO_SYNC:-1}" = "1" ]; then python3 sync_cofepris.py || echo 'AVISO: COFEPRIS no pudo sincronizarse; el servidor seguirá iniciado.'; fi
+exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8000
