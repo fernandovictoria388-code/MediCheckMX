@@ -9,116 +9,80 @@ RAW=DATA/'cofepris_raw'
 RAW.mkdir(parents=True, exist_ok=True)
 PAGE='https://www.gob.mx/cofepris/documentos/registros-sanitarios-medicamentos'
 VIEWER='https://registros.cofepris.gob.mx/BRSDM/'
-HEAD={'User-Agent':'MediCheckMX/0.29 official-source-sync'}
+HEADERS_LIST=[
+ {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36','Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','Accept-Language':'es-MX,es;q=0.9,en;q=0.7','Referer':'https://www.gob.mx/cofepris/','Cache-Control':'no-cache'},
+ {'User-Agent':'MediCheckMX/31 official COFEPRIS sync','Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','Accept-Language':'es-MX,es;q=0.9'}
+]
+def fetch_official_page():
+    urls=[PAGE,PAGE+'?idiom=es','https://www.gob.mx/cofepris/documentos/registros-sanitarios-medicamentos?tab=documents']
+    diagnostics=[]
+    for url in urls:
+        for headers in HEADERS_LIST:
+            try:
+                r=requests.get(url,headers=headers,timeout=60,allow_redirects=True)
+                diagnostics.append({'url':url,'status':r.status_code,'final_url':r.url,'bytes':len(r.content),'content_type':r.headers.get('content-type','')})
+                if r.ok and len(r.text)>5000 and ('Registros_Alopaticos' in r.text or 'Visor de Registros' in r.text):
+                    return r.text,diagnostics
+            except Exception as e: diagnostics.append({'url':url,'error':str(e)})
+    raise RuntimeError('COFEPRIS_HTML_FETCH_FAILED: '+json.dumps(diagnostics,ensure_ascii=False))
 
-
-def norm(s):
-    s=unicodedata.normalize('NFKD',str(s or '')).encode('ascii','ignore').decode('ascii')
-    return re.sub(r'\s+',' ',s).upper().strip()
-
-
-def get_years(env_name, default):
-    return [x.strip() for x in os.getenv(env_name,default).split(',') if x.strip()]
-
+def absolute_url(href):
+    href=(href or '').strip()
+    if href.startswith('//'): return 'https:'+href
+    if href.startswith('/'): return 'https://www.gob.mx'+href
+    if re.match(r'^https?://',href,re.I): return href
+    return 'https://www.gob.mx/'+href.lstrip('/')
 
 def discover():
-    r=requests.get(PAGE,headers=HEAD,timeout=60)
-    r.raise_for_status()
-    html=r.text
-    soup=BeautifulSoup(html,'html.parser')
-
-    # COFEPRIS currently renders many document names as text followed by a
-    # separate "Descargar documento" link. Older versions also exposed the
-    # filename directly in the href. We support both structures.
-    candidates=[]
-    for a in soup.find_all('a', href=True):
-        href=a.get('href','').strip()
-        txt=' '.join(a.stripped_strings)
-        if href.startswith('//'): href='https:'+href
-        elif href.startswith('/'): href='https://www.gob.mx'+href
-        elif not re.match(r'^https?://',href,re.I):
-            href='https://www.gob.mx'+('/' if not href.startswith('/') else '')+href
-        context=[]
-        try:
-            parent=a.parent
-            if parent: context.append(' '.join(parent.stripped_strings))
-            # The filename is commonly in a nearby preceding sibling/container.
-            for _ in range(3):
-                if parent is None: break
-                prev=parent.find_previous(string=True)
-                if prev: context.append(str(prev))
-                parent=parent.parent
-        except Exception:
-            pass
-        candidates.append((txt,href,' '.join(context)))
-
-    def find(label):
-        target=norm(label)
-        target_nopdf=target[:-4] if target.endswith('.PDF') else target
-        # 1) Filename present in href or anchor/context text.
-        for txt,href,ctx in candidates:
-            blob=norm(' '.join((txt,href,ctx)))
-            if target in blob or target_nopdf in blob:
-                return href
-        # 2) Find the visible document title in the DOM, then locate the
-        # nearest download anchor in its container/ancestors.
-        pat=re.compile(re.escape(label),re.I)
-        node=soup.find(string=pat)
-        if node is None and label.endswith('.pdf'):
-            node=soup.find(string=re.compile(re.escape(label[:-4]),re.I))
-        if node is not None:
-            cur=node.parent
-            for _ in range(5):
-                if cur is None: break
-                a=cur.find('a',href=True)
-                if a:
-                    href=a.get('href','').strip()
-                    if href.startswith('//'): return 'https:'+href
-                    if href.startswith('/'): return 'https://www.gob.mx'+href
-                    if re.match(r'^https?://',href,re.I): return href
-                cur=cur.parent
-        return None
-
-    out=[]
-    record_years=get_years('COFEPRIS_YEARS','2026')
-    status_years=get_years('COFEPRIS_STATUS_YEARS','2025')
-    cats=[('alopaticos','Registros_Alopaticos_otorgados_'),('herbolarios','Registros_Herbolarios_otorgados_'),('vitaminicos','Registros_Vitaminicos_otorgados_'),('homeopaticos','Registros_Homeopaticos_otorgados_')]
-
+    html,diagnostics=fetch_official_page()
+    soup=BeautifulSoup(html,'html.parser'); candidates=[]
+    for a in soup.find_all('a',href=True):
+        href=absolute_url(a.get('href','')); txt=' '.join(a.stripped_strings); ctx=[]; cur=a
+        for _ in range(8):
+            cur=getattr(cur,'parent',None)
+            if cur is None: break
+            t=' '.join(cur.stripped_strings)
+            if t: ctx.append(t)
+            if len(t)>5000: break
+        candidates.append((txt,href,' '.join(ctx)))
+    record_years=get_years('COFEPRIS_YEARS','2026'); status_years=get_years('COFEPRIS_STATUS_YEARS','2025')
+    wanted=[]; cats=[('alopaticos','Registros_Alopaticos_otorgados_'),('herbolarios','Registros_Herbolarios_otorgados_'),('vitaminicos','Registros_Vitaminicos_otorgados_'),('homeopaticos','Registros_Homeopaticos_otorgados_')]
     for year in record_years:
-        for key,prefix in cats:
-            label=prefix+year
-            href=find(label)
-            if href: out.append({'key':f'{key}_{year}','label':label,'url':href,'kind':'record','year':year})
-
+        for key,prefix in cats: wanted.append((f'{key}_{year}',prefix+year,'record',year,None))
     for year in status_years:
-        for status,label in [('REVOKED',f'Registros Revocados Medicamentos {year}'),('CANCELLED',f'Registros Cancelados Medicamentos {year}')]:
-            href=find(label)
-            if href: out.append({'key':f'{status.lower()}_{year}','label':label,'url':href,'kind':'status','year':year,'status':status})
-
-    # Last-resort discovery from the raw HTML: if the filename/title appears,
-    # capture the closest href in the surrounding markup. This handles future
-    # small layout changes without hard-coding COFEPRIS file URLs.
-    if not out:
-        wanted=[]
-        for year in record_years:
-            for _,prefix in cats: wanted.append((prefix+year,'record',year,None))
-        for year in status_years:
-            wanted.extend([(f'Registros Revocados Medicamentos {year}','status',year,'REVOKED'),
-                           (f'Registros Cancelados Medicamentos {year}','status',year,'CANCELLED')])
-        for label,kind,year,status in wanted:
-            m=re.search(r'(?is)(?:href\\s*=\\s*["\\\']([^"\\\']+)["\\\'][^>]{0,800}'+re.escape(label)+r'|'+re.escape(label)+r'[^<]{0,800}href\\s*=\\s*["\\\']([^"\\\']+)["\\\'])',html)
-            if m:
-                href=next((x for x in m.groups() if x),None)
-                if href:
-                    if href.startswith('//'): href='https:'+href
-                    elif href.startswith('/'): href='https://www.gob.mx'+href
-                    out.append({'key':norm(label).lower().replace(' ','_'),'label':label,'url':href,'kind':kind,'year':year,**({'status':status} if status else {})})
-    # De-duplicate by key/url.
+        wanted.append((f'revoked_{year}',f'Registros Revocados Medicamentos {year}','status',year,'REVOKED'))
+        wanted.append((f'cancelled_{year}',f'Registros Cancelados Medicamentos {year}','status',year,'CANCELLED'))
+    out=[]
+    for key,label,kind,year,status in wanted:
+        target=norm(label); target2=target[:-4] if target.endswith('.PDF') else target; found=False
+        for txt,href,ctx in candidates:
+            blob=norm(txt+' '+ctx)
+            if target in blob or target2 in blob:
+                out.append({'key':key,'label':label,'url':href,'kind':kind,'year':year,**({'status':status} if status else {})}); found=True; break
+        if found: continue
+        pos=-1
+        for needle in (label,label+'.pdf' if not label.lower().endswith('.pdf') else label[:-4]):
+            m=re.search(re.escape(needle),html,re.I)
+            if m: pos=m.start(); break
+        if pos>=0:
+            window=html[max(0,pos-20000):min(len(html),pos+20000)]
+            patterns=[
+                '(?:href|data-href|data-url)\\s*=\\s*["\\\']([^"\\\']+)["\\\']',
+                '(?:window\\.open|location(?:\\.href)?|download)\\s*\\(\\s*["\\\']([^"\\\']+)["\\\']',
+                'https?://[^"\' <>\\s]+',
+                '/cms/uploads/attachment/file/[^"\' <>\\s]+'
+            ]
+            for pat in patterns:
+                for mm in re.finditer(pat,window,re.I):
+                    raw=mm.group(1) if mm.groups() else mm.group(0); href=absolute_url(raw)
+                    if 'gob.mx' in href or '/cms/uploads/attachment/file/' in href:
+                        out.append({'key':key,'label':label,'url':href,'kind':kind,'year':year,**({'status':status} if status else {})}); found=True; break
+                if found: break
     seen=set(); unique=[]
     for x in out:
         k=(x['key'],x['url'])
-        if k not in seen:
-            seen.add(k); unique.append(x)
+        if k not in seen: seen.add(k); unique.append(x)
+    if not unique: raise RuntimeError('COFEPRIS no devolvió enlaces compatibles. DIAGNOSTICO='+json.dumps(diagnostics,ensure_ascii=False))
     return unique
 
 
